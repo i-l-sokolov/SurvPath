@@ -202,10 +202,15 @@ def _init_model(args):
         }
         model = MCATPathwaysMotCat(**model_dict)
 
-    # survpath 
+    # survpath
     elif args.modality == "survpath":
 
-        model_dict = {'omic_sizes': args.omic_sizes, 'num_classes': args.n_classes}
+        model_dict = {
+            'omic_sizes': args.omic_sizes,
+            'num_classes': args.n_classes,
+            'protein_embedding_dim': getattr(args, 'protein_embedding_dim', 1280),
+            'num_proteins': getattr(args, 'num_proteins', 100)
+        }
 
         if args.use_nystrom:
             model = SurvPath_with_nystrom(**model_dict)
@@ -339,20 +344,27 @@ def _unpack_data(modality, device, data):
         data_omics = []
         for item in data[1][0]:
             data_omics.append(item.to(device))
-        
-        if data[6][0,0] == 1:
+
+        # Add protein data
+        data_protein = data[2].to(device)
+
+        if data[7][0,0] == 1:
             mask = None
         else:
-            mask = data[6].to(device)
+            mask = data[7].to(device)
 
-        y_disc, event_time, censor, clinical_data_list = data[2], data[3], data[4], data[5]
-        
+        y_disc, event_time, censor, clinical_data_list = data[3], data[4], data[5], data[6]
+
     else:
         raise ValueError('Unsupported modality:', modality)
-    
+
     y_disc, event_time, censor = y_disc.to(device), event_time.to(device), censor.to(device)
 
-    return data_WSI, mask, y_disc, event_time, censor, data_omics, clinical_data_list, mask
+    # Return protein data for survpath modality
+    if modality in ["survpath"]:
+        return data_WSI, mask, y_disc, event_time, censor, data_omics, clinical_data_list, mask, data_protein
+    else:
+        return data_WSI, mask, y_disc, event_time, censor, data_omics, clinical_data_list, mask
 
 def _process_data_and_forward(model, modality, device, data):
     r"""
@@ -372,25 +384,31 @@ def _process_data_and_forward(model, modality, device, data):
         - clinical_data_list : List
     
     """
-    data_WSI, mask, y_disc, event_time, censor, data_omics, clinical_data_list, mask = _unpack_data(modality, device, data)
+    unpacked_data = _unpack_data(modality, device, data)
 
-    if modality in ["coattn", "coattn_motcat"]:  
-        
+    if modality in ["survpath"]:
+        data_WSI, mask, y_disc, event_time, censor, data_omics, clinical_data_list, mask, data_protein = unpacked_data
+    else:
+        data_WSI, mask, y_disc, event_time, censor, data_omics, clinical_data_list, mask = unpacked_data
+
+    if modality in ["coattn", "coattn_motcat"]:
+
         out = model(
-            x_path=data_WSI, 
-            x_omic1=data_omics[0], 
-            x_omic2=data_omics[1], 
-            x_omic3=data_omics[2], 
-            x_omic4=data_omics[3], 
-            x_omic5=data_omics[4], 
+            x_path=data_WSI,
+            x_omic1=data_omics[0],
+            x_omic2=data_omics[1],
+            x_omic3=data_omics[2],
+            x_omic4=data_omics[3],
+            x_omic5=data_omics[4],
             x_omic6=data_omics[5]
-            )  
+            )
 
     elif modality == 'survpath':
 
         input_args = {"x_path": data_WSI.to(device)}
         for i in range(len(data_omics)):
             input_args['x_omic%s' % str(i+1)] = data_omics[i].type(torch.FloatTensor).to(device)
+        input_args["x_protein"] = data_protein.type(torch.FloatTensor).to(device)
         input_args["return_attn"] = False
         out = model(**input_args)
         

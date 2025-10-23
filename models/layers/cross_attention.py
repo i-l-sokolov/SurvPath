@@ -45,9 +45,11 @@ class MMAttention(nn.Module):
         eps = 1e-8,
         dropout = 0.,
         num_pathways = 281,
+        num_proteins = 0,
     ):
         super().__init__()
         self.num_pathways = num_pathways
+        self.num_proteins = num_proteins
         self.eps = eps
         inner_dim = heads * dim_head
 
@@ -62,7 +64,7 @@ class MMAttention(nn.Module):
             self.res_conv = nn.Conv2d(heads, heads, (kernel_size, 1), padding = (padding, 0), groups = heads, bias = False)
 
     def forward(self, x, mask=None, return_attn=False):
-        b, n, _, h, m, eps = *x.shape, self.heads, self.num_pathways, self.eps
+        b, n, _, h, eps = *x.shape, self.heads, self.eps
 
         # derive query, keys, values
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
@@ -76,30 +78,81 @@ class MMAttention(nn.Module):
         # regular transformer scaling
         q = q * self.scale
 
-        # extract the pathway/histology queries and keys
-        q_pathways = q[:, :, :self.num_pathways, :]  # bs x head x num_pathways x dim
-        k_pathways = k[:, :, :self.num_pathways, :]
+        # Check if we have proteins (3-modality) or not (2-modality)
+        if self.num_proteins > 0:
+            # Three modality case: pathways, proteins, histology
+            # Extract queries and keys for each modality
+            q_pathways = q[:, :, :self.num_pathways, :]
+            k_pathways = k[:, :, :self.num_pathways, :]
+            v_pathways = v[:, :, :self.num_pathways, :]
 
-        q_histology = q[:, :, self.num_pathways:, :]  # bs x head x num_patches x dim
-        k_histology = k[:, :, self.num_pathways:, :]
-        
-        # similarities
-        einops_eq = '... i d, ... j d -> ... i j'
-        cross_attn_histology = einsum(einops_eq, q_histology, k_pathways)
-        attn_pathways = einsum(einops_eq, q_pathways, k_pathways)
-        cross_attn_pathways = einsum(einops_eq, q_pathways, k_histology)
-        
-        # softmax
-        pre_softmax_cross_attn_histology = cross_attn_histology
-        cross_attn_histology = cross_attn_histology.softmax(dim=-1)
-        attn_pathways_histology = torch.cat((attn_pathways, cross_attn_pathways), dim=-1).softmax(dim=-1)
+            q_proteins = q[:, :, self.num_pathways:self.num_pathways+self.num_proteins, :]
+            k_proteins = k[:, :, self.num_pathways:self.num_pathways+self.num_proteins, :]
+            v_proteins = v[:, :, self.num_pathways:self.num_pathways+self.num_proteins, :]
 
-        # compute output 
-        out_pathways =  attn_pathways_histology @ v
-        out_histology = cross_attn_histology @ v[:, :, :self.num_pathways]
+            q_histology = q[:, :, self.num_pathways+self.num_proteins:, :]
+            k_histology = k[:, :, self.num_pathways+self.num_proteins:, :]
+            v_histology = v[:, :, self.num_pathways+self.num_proteins:, :]
 
-        out = torch.cat((out_pathways, out_histology), dim=2)
-        
+            einops_eq = '... i d, ... j d -> ... i j'
+
+            # Pathways attend to: pathways, proteins, histology
+            attn_pp = einsum(einops_eq, q_pathways, k_pathways)
+            attn_pprot = einsum(einops_eq, q_pathways, k_proteins)
+            attn_phist = einsum(einops_eq, q_pathways, k_histology)
+            attn_pathways_all = torch.cat([attn_pp, attn_pprot, attn_phist], dim=-1).softmax(dim=-1)
+
+            # Proteins attend to: pathways, proteins, histology
+            attn_protp = einsum(einops_eq, q_proteins, k_pathways)
+            attn_protprot = einsum(einops_eq, q_proteins, k_proteins)
+            attn_prothist = einsum(einops_eq, q_proteins, k_histology)
+            attn_proteins_all = torch.cat([attn_protp, attn_protprot, attn_prothist], dim=-1).softmax(dim=-1)
+
+            # Histology attends to: pathways, proteins (cross-modal only)
+            attn_histp = einsum(einops_eq, q_histology, k_pathways)
+            attn_histprot = einsum(einops_eq, q_histology, k_proteins)
+            attn_histology_all = torch.cat([attn_histp, attn_histprot], dim=-1).softmax(dim=-1)
+
+            # Aggregate values
+            v_all = torch.cat([v_pathways, v_proteins, v_histology], dim=2)
+            v_pathway_protein = torch.cat([v_pathways, v_proteins], dim=2)
+
+            out_pathways = attn_pathways_all @ v_all
+            out_proteins = attn_proteins_all @ v_all
+            out_histology = attn_histology_all @ v_pathway_protein
+
+            out = torch.cat([out_pathways, out_proteins, out_histology], dim=2)
+
+            # For return attention (simplified for 3-modality)
+            pre_softmax_cross_attn_histology = attn_histp
+            attn_pathways = attn_pp
+            cross_attn_pathways = attn_phist
+
+        else:
+            # Original 2-modality case: pathways and histology only
+            q_pathways = q[:, :, :self.num_pathways, :]
+            k_pathways = k[:, :, :self.num_pathways, :]
+
+            q_histology = q[:, :, self.num_pathways:, :]
+            k_histology = k[:, :, self.num_pathways:, :]
+
+            # similarities
+            einops_eq = '... i d, ... j d -> ... i j'
+            cross_attn_histology = einsum(einops_eq, q_histology, k_pathways)
+            attn_pathways = einsum(einops_eq, q_pathways, k_pathways)
+            cross_attn_pathways = einsum(einops_eq, q_pathways, k_histology)
+
+            # softmax
+            pre_softmax_cross_attn_histology = cross_attn_histology
+            cross_attn_histology = cross_attn_histology.softmax(dim=-1)
+            attn_pathways_histology = torch.cat((attn_pathways, cross_attn_pathways), dim=-1).softmax(dim=-1)
+
+            # compute output
+            out_pathways =  attn_pathways_histology @ v
+            out_histology = cross_attn_histology @ v[:, :, :self.num_pathways]
+
+            out = torch.cat((out_pathways, out_histology), dim=2)
+
         # add depth-wise conv residual of values
         if self.residual:
             out += self.res_conv(v)
@@ -107,7 +160,7 @@ class MMAttention(nn.Module):
         # merge and combine heads
         out = rearrange(out, 'b h n d -> b n (h d)', h = h)
 
-        if return_attn:  
+        if return_attn:
             # return three matrices
             return out, attn_pathways.squeeze().detach().cpu(), cross_attn_pathways.squeeze().detach().cpu(), pre_softmax_cross_attn_histology.squeeze().detach().cpu()
 
@@ -128,18 +181,21 @@ class MMAttentionLayer(nn.Module):
         residual=True,
         dropout=0.,
         num_pathways = 281,
+        num_proteins = 0,
     ):
 
         super().__init__()
         self.norm = norm_layer(dim)
         self.num_pathways = num_pathways
+        self.num_proteins = num_proteins
         self.attn = MMAttention(
             dim=dim,
             dim_head=dim_head,
             heads=heads,
             residual=residual,
             dropout=dropout,
-            num_pathways=num_pathways
+            num_pathways=num_pathways,
+            num_proteins=num_proteins
         )
 
     def forward(self, x=None, mask=None, return_attention=False):

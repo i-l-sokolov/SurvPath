@@ -25,17 +25,20 @@ class SurvivalDatasetFactory:
 
     def __init__(self,
         study,
-        label_file, 
+        label_file,
         omics_dir,
-        seed, 
-        print_info, 
-        n_bins, 
-        label_col, 
+        seed,
+        print_info,
+        n_bins,
+        label_col,
         eps=1e-6,
         num_patches=4096,
         is_mcat=False,
         is_survpath=True,
         type_of_pathway="combine",
+        protein_dir=None,
+        num_proteins=100,
+        protein_embedding_dim=1280,
         ):
         r"""
         Initialize the factory to store metadata, survival label, and slide_ids for each case id. 
@@ -72,6 +75,9 @@ class SurvivalDatasetFactory:
         self.is_mcat = is_mcat
         self.is_survpath = is_survpath
         self.type_of_path = type_of_pathway
+        self.protein_dir = protein_dir
+        self.num_proteins = num_proteins
+        self.protein_embedding_dim = protein_embedding_dim
 
         if self.label_col == "survival_months":
             self.survival_endpoint = "OS"
@@ -592,7 +598,10 @@ class SurvivalDatasetFactory:
             clinical_data = clinical_data_for_split,
             num_patches = self.num_patches,
             omic_names = self.omic_names,
-            sample=sample
+            sample=sample,
+            protein_dir=self.protein_dir,
+            num_proteins=self.num_proteins,
+            protein_embedding_dim=self.protein_embedding_dim
             )
 
         if split_key == "train":
@@ -612,9 +621,9 @@ class SurvivalDataset(Dataset):
         study_name,
         modality,
         patient_dict,
-        metadata, 
+        metadata,
         omics_data_dict,
-        data_dir, 
+        data_dir,
         num_classes,
         label_col="survival_months_DSS",
         censorship_var = "censorship_DSS",
@@ -624,6 +633,9 @@ class SurvivalDataset(Dataset):
         num_patches=4000,
         omic_names=None,
         sample=True,
+        protein_dir=None,
+        num_proteins=100,
+        protein_embedding_dim=1280,
         ): 
 
         super(SurvivalDataset, self).__init__()
@@ -634,7 +646,7 @@ class SurvivalDataset(Dataset):
         self.study_name = study_name
         self.modality = modality
         self.patient_dict = patient_dict
-        self.metadata = metadata 
+        self.metadata = metadata
         self.omics_data_dict = omics_data_dict
         self.data_dir = data_dir
         self.num_classes = num_classes
@@ -647,6 +659,9 @@ class SurvivalDataset(Dataset):
         self.omic_names = omic_names
         self.num_pathways = len(omic_names)
         self.sample = sample
+        self.protein_dir = protein_dir
+        self.num_proteins = num_proteins
+        self.protein_embedding_dim = protein_embedding_dim
 
         # for weighted sampling
         self.slide_cls_id_prep()
@@ -727,8 +742,11 @@ class SurvivalDataset(Dataset):
             omic_list = []
             for i in range(self.num_pathways):
                 omic_list.append(torch.tensor(self.omics_data_dict["rna"][self.omic_names[i]].iloc[idx]))
-            
-            return (patch_features, omic_list, label, event_time, c, clinical_data, mask)
+
+            # Load protein embeddings
+            protein_embs = self._load_protein_embeddings(case_id)
+
+            return (patch_features, omic_list, protein_embs, label, event_time, c, clinical_data, mask)
         
         else:
             raise NotImplementedError('Model Type [%s] not implemented.' % self.modality)
@@ -803,6 +821,32 @@ class SurvivalDataset(Dataset):
             mask = torch.ones([1])
 
         return patch_features, mask
+
+    def _load_protein_embeddings(self, case_id):
+        """
+        Load pre-computed protein structure embeddings for a case.
+        For testing, generates dummy embeddings if protein_dir is None.
+
+        Args:
+            case_id: String
+
+        Returns:
+            torch.Tensor: [num_proteins, protein_embedding_dim]
+        """
+        if self.protein_dir is None:
+            # Generate dummy protein embeddings for testing
+            return torch.randn(self.num_proteins, self.protein_embedding_dim)
+
+        protein_path = os.path.join(self.protein_dir, f'{case_id}_protein.pt')
+        if os.path.exists(protein_path):
+            protein_embs = torch.load(protein_path)
+            # Ensure correct shape
+            if isinstance(protein_embs, dict):
+                protein_embs = protein_embs.get('embeddings', protein_embs.get('data'))
+            return protein_embs
+        else:
+            # Fallback to dummy embeddings if file not found
+            return torch.randn(self.num_proteins, self.protein_embedding_dim)
 
     def get_clinical_data(self, case_id):
         """

@@ -40,13 +40,15 @@ def SNN_Block(dim1, dim2, dropout=0.25):
 
 class SurvPath(nn.Module):
     def __init__(
-        self, 
+        self,
         omic_sizes=[100, 200, 300, 400, 500, 600],
         wsi_embedding_dim=1024,
         dropout=0.1,
         num_classes=4,
         wsi_projection_dim=256,
         omic_names = [],
+        protein_embedding_dim=1280,
+        num_proteins=100,
         ):
         super(SurvPath, self).__init__()
 
@@ -67,11 +69,19 @@ class SurvPath(nn.Module):
             self.all_gene_names = all_gene_names
 
         #---> wsi props
-        self.wsi_embedding_dim = wsi_embedding_dim 
+        self.wsi_embedding_dim = wsi_embedding_dim
         self.wsi_projection_dim = wsi_projection_dim
 
         self.wsi_projection_net = nn.Sequential(
             nn.Linear(self.wsi_embedding_dim, self.wsi_projection_dim),
+        )
+
+        #---> protein props
+        self.protein_embedding_dim = protein_embedding_dim
+        self.num_proteins = num_proteins
+
+        self.protein_projection_net = nn.Sequential(
+            nn.Linear(self.protein_embedding_dim, self.wsi_projection_dim),
         )
 
         #---> omics props
@@ -85,7 +95,8 @@ class SurvPath(nn.Module):
             heads=1,
             residual=False,
             dropout=0.1,
-            num_pathways = self.num_pathways
+            num_pathways = self.num_pathways,
+            num_proteins = self.num_proteins
         )
 
         #---> logits props 
@@ -114,42 +125,59 @@ class SurvPath(nn.Module):
 
         wsi = kwargs['x_path']
         x_omic = [kwargs['x_omic%d' % i] for i in range(1,self.num_pathways+1)]
+        x_protein = kwargs.get('x_protein', None)  # Get protein embeddings if provided
         mask = None
         return_attn = kwargs["return_attn"]
-        
-        #---> get pathway embeddings 
+
+        #---> get pathway embeddings
         h_omic = [self.sig_networks[idx].forward(sig_feat.float()) for idx, sig_feat in enumerate(x_omic)] ### each omic signature goes through it's own FC layer
         h_omic_bag = torch.stack(h_omic).unsqueeze(0) ### omic embeddings are stacked (to be used in co-attention)
 
         #---> project wsi to smaller dimension (same as pathway dimension)
         wsi_embed = self.wsi_projection_net(wsi)
 
-        tokens = torch.cat([h_omic_bag, wsi_embed], dim=1)
+        #---> project proteins to same dimension if provided
+        if x_protein is not None:
+            protein_embed = self.protein_projection_net(x_protein)
+            # Concatenate all three modalities: pathways, proteins, histology
+            tokens = torch.cat([h_omic_bag, protein_embed, wsi_embed], dim=1)
+        else:
+            # Original 2-modality version: pathways and histology only
+            tokens = torch.cat([h_omic_bag, wsi_embed], dim=1)
+
         tokens = self.identity(tokens)
-        
+
         if return_attn:
             mm_embed, attn_pathways, cross_attn_pathways, cross_attn_histology = self.cross_attender(x=tokens, mask=mask if mask is not None else None, return_attention=True)
         else:
             mm_embed = self.cross_attender(x=tokens, mask=mask if mask is not None else None, return_attention=False)
 
-        #---> feedforward and layer norm 
+        #---> feedforward and layer norm
         mm_embed = self.feed_forward(mm_embed)
         mm_embed = self.layer_norm(mm_embed)
-        
-        #---> aggregate 
-        # modality specific mean 
+
+        #---> aggregate
+        # modality specific mean
         paths_postSA_embed = mm_embed[:, :self.num_pathways, :]
         paths_postSA_embed = torch.mean(paths_postSA_embed, dim=1)
 
-        wsi_postSA_embed = mm_embed[:, self.num_pathways:, :]
-        wsi_postSA_embed = torch.mean(wsi_postSA_embed, dim=1)
+        if x_protein is not None:
+            # Three modality case
+            protein_postSA_embed = mm_embed[:, self.num_pathways:self.num_pathways+self.num_proteins, :]
+            protein_postSA_embed = torch.mean(protein_postSA_embed, dim=1)
 
-        # when both top and bottom block
-        embedding = torch.cat([paths_postSA_embed, wsi_postSA_embed], dim=1) #---> both branches
-        # embedding = paths_postSA_embed #---> top bloc only
-        # embedding = wsi_postSA_embed #---> bottom bloc only
+            wsi_postSA_embed = mm_embed[:, self.num_pathways+self.num_proteins:, :]
+            wsi_postSA_embed = torch.mean(wsi_postSA_embed, dim=1)
 
-        # embedding = torch.mean(mm_embed, dim=1)
+            # Combine all three modalities
+            embedding = torch.cat([paths_postSA_embed, protein_postSA_embed, wsi_postSA_embed], dim=1)
+        else:
+            # Two modality case (original)
+            wsi_postSA_embed = mm_embed[:, self.num_pathways:, :]
+            wsi_postSA_embed = torch.mean(wsi_postSA_embed, dim=1)
+
+            embedding = torch.cat([paths_postSA_embed, wsi_postSA_embed], dim=1)
+
         #---> get logits
         logits = self.to_logits(embedding)
 
