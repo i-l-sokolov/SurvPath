@@ -341,12 +341,15 @@ def _unpack_data(modality, device, data):
 
         data_WSI = data[0].to(device)
 
+        # data[1] is a list of omic tensors (one per sample in batch)
+        # For batch_size=1, we get data[1][0] which is the list of pathway tensors
         data_omics = []
-        for item in data[1][0]:
+        for item in data[1][0]:  # Unpack first sample's pathway list
             data_omics.append(item.to(device))
 
-        # Add protein data
-        data_protein = data[2].to(device)
+        # data[2] is a list of protein tensors (one per sample in batch)
+        # For batch_size=1, we get data[2][0]
+        data_protein = data[2][0].to(device)
 
         if data[7][0,0] == 1:
             mask = None

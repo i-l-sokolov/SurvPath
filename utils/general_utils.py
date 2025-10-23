@@ -396,38 +396,44 @@ def _collate_MCAT(batch):
 def _collate_survpath(batch):
     r"""
     Collate function for survpath
-    
+
     Args:
-        - batch 
-    
+        - batch
+
     Returns:
-        - img : torch.Tensor 
+        - img : torch.Tensor
         - omic_data_list : List
-        - label : torch.LongTensor 
-        - event_time : torch.FloatTensor 
-        - c : torch.FloatTensor 
+        - protein_data_list : List (NEW - protein embeddings)
+        - label : torch.LongTensor
+        - event_time : torch.FloatTensor
+        - c : torch.FloatTensor
         - clinical_data_list : List
         - mask : torch.Tensor
-        
+
     """
-    
+
     img = torch.stack([item[0] for item in batch])
 
     omic_data_list = []
     for item in batch:
         omic_data_list.append(item[1])
 
-    label = torch.LongTensor([item[2].long() for item in batch])
-    event_time = torch.FloatTensor([item[3] for item in batch])
-    c = torch.FloatTensor([item[4] for item in batch])
+    # NEW: Collect protein embeddings
+    protein_data_list = []
+    for item in batch:
+        protein_data_list.append(item[2])
+
+    label = torch.LongTensor([item[3].long() for item in batch])
+    event_time = torch.FloatTensor([item[4] for item in batch])
+    c = torch.FloatTensor([item[5] for item in batch])
 
     clinical_data_list = []
     for item in batch:
-        clinical_data_list.append(item[5])
+        clinical_data_list.append(item[6])
 
-    mask = torch.stack([item[6] for item in batch], dim=0)
+    mask = torch.stack([item[7] for item in batch], dim=0)
 
-    return [img, omic_data_list, label, event_time, c, clinical_data_list, mask]
+    return [img, omic_data_list, protein_data_list, label, event_time, c, clinical_data_list, mask]
 
 def _make_weights_for_balanced_classes_split(dataset):
     r"""
